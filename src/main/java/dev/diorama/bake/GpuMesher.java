@@ -2136,7 +2136,40 @@ public final class GpuMesher {
 	}
 
 	/** Corner occlusion on a top face, from the eight blocks around the cell {@code (x, y, z)} above it: nw, ne, sw, se. */
+	/**
+	 * Whether faces take their corner occlusion from {@link VoxelReader#ringXZ} and {@link VoxelReader#ringXY}
+	 * and {@link #AO}. Only for checking that meshes come out the same either way.
+	 */
+	public static boolean RINGS = true;
+
+	/**
+	 * {@link #aoTop}'s and {@link #aoSouth}'s result for every ring of nine cells as the readers' rings
+	 * give them: the first row (north, or above) in bits 0 to 2, the middle in 3 to 5, the last in 6 to 8.
+	 */
+	private static final int[] AO = new int[512];
+
+	static {
+		for (int ring = 0; ring < 512; ring++) {
+			boolean firstW = (ring & 1) != 0;
+			boolean first = (ring & 2) != 0;
+			boolean firstE = (ring & 4) != 0;
+			boolean w = (ring & 8) != 0;
+			boolean e = (ring & 32) != 0;
+			boolean lastW = (ring & 64) != 0;
+			boolean last = (ring & 128) != 0;
+			boolean lastE = (ring & 256) != 0;
+			AO[ring] = pack(TileBaker.corner(w, first, firstW), TileBaker.corner(e, first, firstE), TileBaker.corner(w, last, lastW),
+				TileBaker.corner(e, last, lastE));
+		}
+	}
+
 	private static int aoTop(TileBaker h, int x, int y, int z) {
+		if (RINGS) {
+			int ring = h.reader.ringXZ(x, y, z);
+			if (ring >= 0) {
+				return AO[ring];
+			}
+		}
 		boolean n = h.occludes(x, y, z - 1);
 		boolean s = h.occludes(x, y, z + 1);
 		boolean w = h.occludes(x - 1, y, z);
@@ -2151,6 +2184,12 @@ public final class GpuMesher {
 
 	/** Same for a south face; {@code z} is the open layer in front of it: top west, top east, bottom west, bottom east. */
 	private static int aoSouth(TileBaker h, int x, int y, int z) {
+		if (RINGS) {
+			int ring = h.reader.ringXY(x, y, z);
+			if (ring >= 0) {
+				return AO[ring];
+			}
+		}
 		boolean up = h.occludes(x, y + 1, z);
 		boolean down = h.occludes(x, y - 1, z);
 		boolean w = h.occludes(x - 1, y, z);

@@ -170,6 +170,57 @@ public final class VoxelReader {
 	}
 
 	/**
+	 * {@link #solid} above 0 for the nine cells around {@code (x, y, z)} in its layer of y, a bit
+	 * each: the row at z - 1 in bits 0 to 2, z in 3 to 5, z + 1 in 6 to 8, each from x - 1 up. Read
+	 * from the section's bits in one go; -1 where the nine aren't all in one section, which
+	 * {@link #solid} answers one at a time.
+	 */
+	int ringXZ(int x, int y, int z) {
+		int lx = x & 15;
+		int lz = z & 15;
+		if (lx == 0 || lx == 15 || lz == 0 || lz == 15 || y < this.minY || y >= this.maxY) {
+			return -1;
+		}
+		long[] mask = this.solidMaskAt(x >> 4, y >> 4, z >> 4);
+		if (mask == null) {
+			return 0;
+		}
+		int i = ((y & 15) << 8) | (lz << 4) | lx;
+		return three(mask, i - 17) | three(mask, i - 1) << 3 | three(mask, i + 15) << 6;
+	}
+
+	/**
+	 * The same for the nine cells around {@code (x, y, z)} in its layer of z: the row at y + 1 in
+	 * bits 0 to 2, y in 3 to 5, y - 1 in 6 to 8.
+	 */
+	int ringXY(int x, int y, int z) {
+		int lx = x & 15;
+		int ly = y & 15;
+		if (lx == 0 || lx == 15 || ly == 0 || ly == 15 || y < this.minY || y >= this.maxY) {
+			return -1;
+		}
+		long[] mask = this.solidMaskAt(x >> 4, y >> 4, z >> 4);
+		if (mask == null) {
+			return 0;
+		}
+		int i = (ly << 8) | ((z & 15) << 4) | lx;
+		return three(mask, i + 255) | three(mask, i - 1) << 3 | three(mask, i - 257) << 6;
+	}
+
+	/** Bits {@code i} to {@code i + 2} of a mask, which lie in one word. */
+	private static int three(long[] mask, int i) {
+		return (int) (mask[i >> 6] >>> i) & 7;
+	}
+
+	/** The solid mask of a section, as {@link #solid} reads it: null where the chunk is missing. */
+	private long @Nullable [] solidMaskAt(int sx, int sy, int sz) {
+		if (sx != this.solidX || sy != this.solidY || sz != this.solidZ) {
+			this.enterSolidSection(sx, sy, sz);
+		}
+		return this.solidMask;
+	}
+
+	/**
 	 * Whether an open cell is a pocket one block tall, with solid blocks right above and below it:
 	 * a lone air bubble, a buried lava spring or a crawlspace. Under a roof, rays skipping rock
 	 * skip these too, so they don't speckle solid rock with dots; the baker, its lifted rock and
