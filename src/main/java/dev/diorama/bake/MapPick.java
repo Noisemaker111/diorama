@@ -77,6 +77,15 @@ public final class MapPick {
 		this.tall = this.cave || this.roofless || fromWorldTop ? null : TallChunks.around(tile, source, this.startY);
 	}
 
+	/** Where this pick's rays start, and whether builds above the world's top move that per ray. */
+	public int startY() {
+		return this.startY;
+	}
+
+	public boolean hasTall() {
+		return this.tall != null;
+	}
+
 	/**
 	 * Lets rays through chunks the map has no data for above where the saved tile's rays stood,
 	 * as the baker does (see {@link TileSpots#passedWhenSaved}). Sky view only.

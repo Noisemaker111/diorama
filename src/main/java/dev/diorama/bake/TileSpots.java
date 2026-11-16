@@ -53,6 +53,53 @@ public final class TileSpots {
 		return known ? spots : null;
 	}
 
+	/** Spots worked out for a bake, and the height its rays started from. */
+	public record Picked(int @Nullable [] spots, int startY) {
+	}
+
+	/**
+	 * {@link #pick} for a full bake of which only {@code blocks} (indexed as the map's dirty blocks,
+	 * {@code blockY * (TILE_PIXELS / BLOCK) + blockX}) can have changed since {@code saved} was worked
+	 * out by the bake before, from the same chunks elsewhere and rays starting at {@code savedStartY}.
+	 * Every sample outside those blocks would come out as {@code saved} has it, so only the blocks
+	 * are picked again; anything else (no blocks, no saved spots, another start, builds above the top)
+	 * picks every sample, as {@link #pick} does.
+	 */
+	public static Picked pick(TileImage image, ChunkSource source, BlockLooks looks, boolean fogOfWar, int @Nullable [] saved,
+		java.util.@Nullable BitSet blocks, int savedStartY) {
+		if (!image.isFull() && image.patches().isEmpty()) {
+			return new Picked(null, Integer.MIN_VALUE);
+		}
+		TileKey key = image.key();
+		MapPick pick = new MapPick(source, looks, key, fogOfWar).passWhereSaved(saved);
+		if (blocks == null || saved == null || !image.isFull() || pick.startY() != savedStartY || pick.hasTall()) {
+			return new Picked(pick(image, key, pick, saved), pick.startY());
+		}
+		int[] spots = saved.clone();
+		int perRow = Projection.TILE_PIXELS / TileImage.BLOCK;
+		for (int b = blocks.nextSetBit(0); b >= 0; b = blocks.nextSetBit(b + 1)) {
+			pick(key, pick, spots, saved, (b % perRow) * PATCH_COLUMNS, (b / perRow) * TileImage.BLOCK, PATCH_COLUMNS, TileImage.BLOCK);
+		}
+		boolean known = false;
+		for (int i = 0; i < spots.length && !known; i++) {
+			known = spots[i] != UNKNOWN;
+		}
+		return new Picked(known ? spots : null, pick.startY());
+	}
+
+	private static int @Nullable [] pick(TileImage image, TileKey key, MapPick pick, int @Nullable [] saved) {
+		int[] spots = new int[COLUMNS * ROWS];
+		boolean known = false;
+		if (image.isFull()) {
+			known = pick(key, pick, spots, saved, 0, 0, COLUMNS, ROWS);
+		} else {
+			for (TileImage.Patch patch : image.patches()) {
+				known |= pick(key, pick, spots, saved, patchColumn(patch), patch.blockY() * TileImage.BLOCK, PATCH_COLUMNS, TileImage.BLOCK);
+			}
+		}
+		return known ? spots : null;
+	}
+
 	/** The first column under a patch. */
 	public static int patchColumn(TileImage.Patch patch) {
 		return patch.blockX() * PATCH_COLUMNS;
