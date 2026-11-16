@@ -40,7 +40,7 @@ final class MeshColumns {
 	/** One column as last meshed; see {@link #matches}. */
 	static final class Column {
 		/** Its faces, packed (see {@code Quads.copyOut}): opaque, then water, then plants and glass. */
-		int[] faces;
+		Slabs.Run faces;
 		final int[] counts = new int[3];
 		boolean traceInstead;
 		int lowestY;
@@ -62,7 +62,29 @@ final class MeshColumns {
 		 * where there were none.
 		 */
 		boolean usesSpots;
-		int @Nullable [] spots;
+		Slabs.@Nullable Run spots;
+
+		/** The same column with its ints in other runs; nothing writes a kept column once a tile holds it. */
+		Column with(Slabs.Run faces, Slabs.@Nullable Run spots) {
+			Column copy = new Column();
+			copy.faces = faces;
+			System.arraycopy(this.counts, 0, copy.counts, 0, 3);
+			copy.traceInstead = this.traceInstead;
+			copy.lowestY = this.lowestY;
+			copy.reached = this.reached;
+			copy.y0 = this.y0;
+			copy.y1 = this.y1;
+			copy.z0 = this.z0;
+			copy.z1 = this.z1;
+			copy.cx0 = this.cx0;
+			copy.cz0 = this.cz0;
+			copy.cxCount = this.cxCount;
+			copy.czCount = this.czCount;
+			copy.deps = this.deps;
+			copy.usesSpots = this.usesSpots;
+			copy.spots = spots;
+			return copy;
+		}
 	}
 
 	/** Per chunk: its blocks, block light and sky light tokens, and its tints (null where none were blended). */
@@ -73,16 +95,28 @@ final class MeshColumns {
 		final int x0;
 		final @Nullable Column[] columns;
 		long size;
+		/** The oldest {@link Slabs} array its columns' ints are in. */
+		long oldest = Slabs.serial();
 
 		Tile(Settings settings, int x0, int width) {
 			this.settings = settings;
 			this.x0 = x0;
 			this.columns = new Column[width];
 		}
+
+		/** Notes a column kept in it. */
+		void add(Column column) {
+			this.size += column.faces.length + column.deps.length;
+			this.oldest = Math.min(this.oldest, column.faces.serial);
+			if (column.spots != null) {
+				this.oldest = Math.min(this.oldest, column.spots.serial);
+			}
+		}
 	}
 
 	static synchronized @Nullable Tile get(TileKey key) {
-		return TILES.get(key);
+		Tile tile = TILES.get(key);
+		return tile != null && Slabs.live(tile.oldest) ? tile : null;
 	}
 
 	static synchronized void put(TileKey key, Tile tile) {
@@ -100,6 +134,14 @@ final class MeshColumns {
 			ints -= t.size;
 			it.remove();
 		}
+		// Tiles whose ints are in arrays the store has moved on from: dropped, so the arrays can go.
+		for (it = TILES.values().iterator(); it.hasNext(); ) {
+			Tile t = it.next();
+			if (!Slabs.live(t.oldest)) {
+				ints -= t.size;
+				it.remove();
+			}
+		}
 	}
 
 	/** What a tile's shadow casters depend on besides the chunks: their region, as {@link GpuMesher}'s casters work it out. */
@@ -108,23 +150,43 @@ final class MeshColumns {
 
 	/** One x of a tile's shadow casters as last meshed: its faces, z by z, packed (see {@code Quads.copyCasters}), and the chunks they came from. */
 	static final class CasterRow {
-		int[] faces;
+		Slabs.Run faces;
 		int count;
 		int highest;
 		/** The chunks of x - 1 and x, z by z from {@link #cz0}, by blocks token; {@link ChunkBakeData#MISSING} where none. */
 		int cz0;
 		int czCount;
 		Object[] chunks;
+
+		/** The same row with its faces in another run. */
+		CasterRow with(Slabs.Run faces) {
+			CasterRow copy = new CasterRow();
+			copy.faces = faces;
+			copy.count = this.count;
+			copy.highest = this.highest;
+			copy.cz0 = this.cz0;
+			copy.czCount = this.czCount;
+			copy.chunks = this.chunks;
+			return copy;
+		}
 	}
 
 	static final class CasterTile {
 		final CasterSettings settings;
 		final @Nullable CasterRow[] rows;
 		long size;
+		/** The oldest {@link Slabs} array its rows' ints are in. */
+		long oldest = Slabs.serial();
 
 		CasterTile(CasterSettings settings, int width) {
 			this.settings = settings;
 			this.rows = new CasterRow[width];
+		}
+
+		/** Notes a row kept in it. */
+		void add(CasterRow row) {
+			this.size += row.faces.length + row.chunks.length;
+			this.oldest = Math.min(this.oldest, row.faces.serial);
 		}
 	}
 
@@ -133,7 +195,7 @@ final class MeshColumns {
 
 	static synchronized @Nullable CasterTile casters(TileKey key, CasterSettings settings) {
 		CasterTile tile = CASTERS.get(key);
-		return tile != null && tile.settings.equals(settings) ? tile : null;
+		return tile != null && tile.settings.equals(settings) && Slabs.live(tile.oldest) ? tile : null;
 	}
 
 	static synchronized void put(TileKey key, CasterTile tile) {
@@ -150,6 +212,13 @@ final class MeshColumns {
 			}
 			casterInts -= t.size;
 			it.remove();
+		}
+		for (it = CASTERS.values().iterator(); it.hasNext(); ) {
+			CasterTile t = it.next();
+			if (!Slabs.live(t.oldest)) {
+				casterInts -= t.size;
+				it.remove();
+			}
 		}
 	}
 
@@ -222,31 +291,45 @@ final class MeshColumns {
 		column.deps = deps;
 	}
 
-	/** The saved spots of the tile's block column {@code column}, top row first, or null where there are none. */
-	static int @Nullable [] spotColumn(int @Nullable [] spots, int column) {
+	/** The saved spots of the tile's block column {@code column}, top row first, kept, or null where there are none. */
+	static Slabs.@Nullable Run spotColumn(int @Nullable [] spots, int column) {
 		if (spots == null || column < 0 || column >= TileSpots.COLUMNS) {
 			return null;
 		}
-		int[] out = new int[TileSpots.ROWS];
+		int[] out = scratch(TileSpots.ROWS);
 		for (int row = 0; row < TileSpots.ROWS; row++) {
 			out[row] = spots[row * TileSpots.COLUMNS + column];
 		}
-		return out;
+		return Slabs.keep(out, 0, TileSpots.ROWS);
 	}
 
-	static boolean sameSpots(int @Nullable [] kept, int @Nullable [] spots, int column) {
+	static boolean sameSpots(Slabs.@Nullable Run kept, int @Nullable [] spots, int column) {
 		if (spots == null || column < 0 || column >= TileSpots.COLUMNS) {
 			return kept == null;
 		}
 		if (kept == null) {
 			return false;
 		}
+		int[] slab = kept.ints();
+		int at = kept.offset;
 		for (int row = 0; row < TileSpots.ROWS; row++) {
-			if (spots[row * TileSpots.COLUMNS + column] != kept[row]) {
+			if (spots[row * TileSpots.COLUMNS + column] != slab[at + row]) {
 				return false;
 			}
 		}
 		return true;
+	}
+
+	private static final ThreadLocal<int[]> SCRATCH = ThreadLocal.withInitial(() -> new int[4096]);
+
+	/** This thread's array of at least {@code length} ints, for packing a run before {@link Slabs#keep} copies it. */
+	static int[] scratch(int length) {
+		int[] scratch = SCRATCH.get();
+		if (scratch.length < length) {
+			scratch = new int[Math.max(length, scratch.length * 2)];
+			SCRATCH.set(scratch);
+		}
+		return scratch;
 	}
 
 	/**

@@ -235,9 +235,9 @@ public final class GpuMesher {
 		 * Adds {@code count} shadow caster faces of column {@code x} as {@link #copyCasters} packed them,
 		 * with the same {@code zBase} and {@code minY}, as {@code add} would.
 		 */
-		void addCasters(int x, int[] faces, int count, int zBase, int minY) {
+		void addCasters(int x, int[] faces, int at, int count, int zBase, int minY) {
 			long to = this.reserve(count);
-			int k = 0;
+			int k = at;
 			for (int f = 0; f < count; f++) {
 				int packed = faces[k++];
 				boolean whole = (packed & 1) == 0;
@@ -277,12 +277,12 @@ public final class GpuMesher {
 		/**
 		 * Packs faces {@code from} to {@code to}, all of them shadow casters of one x, as {@link #addCasters}
 		 * takes them: one int a face, {@code (z - zBase) << 16 | (y - minY) << 3 | face << 1}, and where its
-		 * box isn't the whole cube, bit 0 set and lo and hi after it. Null if one doesn't fit, or isn't
-		 * what {@link #add} makes of a caster.
+		 * box isn't the whole cube, bit 0 set and lo and hi after it, into {@code out}, which holds at
+		 * least three ints a face. Returns how many it wrote, or -1 if a face doesn't fit, or isn't what
+		 * {@link #add} makes of a caster.
 		 */
-		int @Nullable [] copyCasters(int from, int to, int zBase, int minY) {
+		int copyCasters(int from, int to, int zBase, int minY, int[] out) {
 			java.nio.IntBuffer data = this.memory.data;
-			int[] out = new int[(to - from) * 3];
 			int k = 0;
 			for (int f = from; f < to; f++) {
 				int i = f * STRIDE;
@@ -293,7 +293,7 @@ public final class GpuMesher {
 				int hi = data.get(i + 9);
 				if (y < 0 || y > 0x1FFF || z < 0 || z > 0x7FFF || face < 0 || face > 3
 					|| (data.get(i + 4) | data.get(i + 5) | data.get(i + 6) | data.get(i + 7) | data.get(i + 10) | data.get(i + 11) | data.get(i + 12) | data.get(i + 13)) != 0) {
-					return null;
+					return -1;
 				}
 				boolean whole = lo == ShapeFaces.FULL_LO && hi == ShapeFaces.FULL_HI;
 				out[k++] = z << 16 | y << 3 | face << 1 | (whole ? 0 : 1);
@@ -302,7 +302,7 @@ public final class GpuMesher {
 					out[k++] = hi;
 				}
 			}
-			return java.util.Arrays.copyOf(out, k);
+			return k;
 		}
 
 		/**
@@ -641,13 +641,23 @@ public final class GpuMesher {
 		/** Takes a column as the tile's last mesh had it, if nothing it depends on has changed; see {@link MeshColumns}. */
 		boolean reuse(int x, MeshColumns.Column was) {
 			Mesh mesh = this.mesh;
+			Slabs.Run faces = was.faces;
+			Slabs.Run spots = was.spots;
 			if (!MeshColumns.matches(was, this.reader, this.helper.savedSpots(), x - this.x0)) {
 				return false;
 			}
-			int at = 0;
 			Quads[] lists = {mesh.opaque, mesh.water, mesh.tinted};
+			int[] before = {mesh.opaque.count, mesh.water.count, mesh.tinted.count};
+			int at = faces.offset;
 			for (int l = 0; l < 3; l++) {
-				at = lists[l].addCopied(x, was.faces, at, was.counts[l], this.zBase, this.reader.minY());
+				at = lists[l].addCopied(x, faces.ints(), at, was.counts[l], this.zBase, this.reader.minY());
+			}
+			if (!Slabs.valid(faces) || spots != null && !Slabs.valid(spots)) {
+				// Its arrays were written over while it was read: take nothing, walk it.
+				for (int l = 0; l < 3; l++) {
+					lists[l].count = before[l];
+				}
+				return false;
 			}
 			mesh.traceInstead |= was.traceInstead;
 			mesh.lowestY = Math.min(mesh.lowestY, was.lowestY);
@@ -659,8 +669,14 @@ public final class GpuMesher {
 				this.fz0 = Math.min(this.fz0, was.z0);
 				this.fz1 = Math.max(this.fz1, was.z1);
 			}
-			this.keep.columns[x - (this.x0 - 1)] = was;
-			this.keep.size += was.faces.length + was.deps.length;
+			// Kept again, copied forward first if its arrays are about to leave the store's window.
+			Slabs.Run keptFaces = Slabs.renew(faces);
+			Slabs.Run keptSpots = spots == null ? null : Slabs.renew(spots);
+			if (keptFaces != null && (spots == null || keptSpots != null)) {
+				MeshColumns.Column column = keptFaces == faces && keptSpots == spots ? was : was.with(keptFaces, keptSpots);
+				this.keep.columns[x - (this.x0 - 1)] = column;
+				this.keep.add(column);
+			}
 			return true;
 		}
 
@@ -1122,13 +1138,14 @@ public final class GpuMesher {
 				column.counts[l] = lists[l].count - before[l];
 				total += column.counts[l];
 			}
-			int[] packed = new int[total * 7];
+			int[] packed = MeshColumns.scratch(total * 7);
 			int at = 0;
 			for (int l = 0; l < 3 && at >= 0; l++) {
 				at = lists[l].copyOut(before[l], lists[l].count, packed, at, zBase, reader.minY());
 			}
 			if (at >= 0) {
-				column.faces = java.util.Arrays.copyOf(packed, at);
+				// Kept before spotColumn, which packs in the same scratch array.
+				column.faces = Slabs.keep(packed, 0, at);
 				column.traceInstead = columnTrace;
 				column.lowestY = columnLowest;
 				column.reached = cy0 <= cy1;
@@ -1144,7 +1161,7 @@ public final class GpuMesher {
 				column.usesSpots = unknown;
 				column.spots = unknown ? MeshColumns.spotColumn(helper.savedSpots(), x - x0) : null;
 				keep.columns[x - (x0 - 1)] = column;
-				keep.size += column.faces.length + column.deps.length;
+				keep.add(column);
 			}
 		}
 			this.fx0 = fx0;
@@ -1459,12 +1476,22 @@ public final class GpuMesher {
 		MeshColumns.CasterTile keep = settings == null ? null : new MeshColumns.CasterTile(settings, cx1 - cx0 + 1);
 		for (int x = cx0; x <= cx1 && mesh.lowestY != Integer.MAX_VALUE; x++) {
 			MeshColumns.CasterRow was = kept == null ? null : kept.rows[x - cx0];
+			Slabs.Run wasFaces = was == null ? null : was.faces;
 			if (was != null && MeshColumns.matches(was, reader, x)) {
-				mesh.casters.addCasters(x, was.faces, was.count, was.cz0 << 4, reader.minY());
-				highest = Math.max(highest, was.highest);
-				keep.rows[x - cx0] = was;
-				keep.size += was.faces.length + was.chunks.length;
-				continue;
+				int countBefore = mesh.casters.count;
+				mesh.casters.addCasters(x, wasFaces.ints(), wasFaces.offset, was.count, was.cz0 << 4, reader.minY());
+				if (Slabs.valid(wasFaces)) {
+					highest = Math.max(highest, was.highest);
+					Slabs.Run keptFaces = Slabs.renew(wasFaces);
+					if (keptFaces != null) {
+						MeshColumns.CasterRow row = keptFaces == wasFaces ? was : was.with(keptFaces);
+						keep.rows[x - cx0] = row;
+						keep.add(row);
+					}
+					continue;
+				}
+				// Its array was written over while it was read: take nothing, work the row out.
+				mesh.casters.count = countBefore;
 			}
 			int first = mesh.casters.count;
 			int highestBefore = highest;
@@ -1542,15 +1569,16 @@ public final class GpuMesher {
 			}
 			int rowHighest = highest;
 			highest = Math.max(highestBefore, rowHighest);
-			int[] packed = keep == null ? null : mesh.casters.copyCasters(first, mesh.casters.count, (cz0 >> 4) << 4, reader.minY());
-			if (packed != null) {
+			int[] packed = keep == null ? null : MeshColumns.scratch((mesh.casters.count - first) * 3);
+			int length = packed == null ? -1 : mesh.casters.copyCasters(first, mesh.casters.count, (cz0 >> 4) << 4, reader.minY(), packed);
+			if (length >= 0) {
 				MeshColumns.CasterRow row = new MeshColumns.CasterRow();
 				row.count = mesh.casters.count - first;
-				row.faces = packed;
+				row.faces = Slabs.keep(packed, 0, length);
 				row.highest = rowHighest;
 				MeshColumns.depend(row, reader, x, cz0, cz1);
 				keep.rows[x - cx0] = row;
-				keep.size += row.faces.length + row.chunks.length;
+				keep.add(row);
 			}
 		}
 		if (keep != null) {

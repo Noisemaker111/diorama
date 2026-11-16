@@ -122,19 +122,35 @@ public final class TileSpots {
 		for (int column = column0; column < column0 + columns; column++) {
 			int x = x0 + column;
 			SpotColumns.Column was = kept == null ? null : kept.columns[column];
+			Slabs.Run wasSpots = was == null ? null : was.spots;
+			Slabs.Run wasSaved = was == null ? null : was.saved;
 			if (was != null && SpotColumns.matches(was, pick, x, saved, column)) {
+				int[] slab = wasSpots.ints();
+				int at = wasSpots.offset;
+				boolean knownHere = false;
 				for (int row = row0; row < row0 + rows; row++) {
 					int i = row * COLUMNS + column;
-					spots[i] = was.spots[row];
-					known |= spots[i] != UNKNOWN;
+					spots[i] = slab[at + row];
+					knownHere |= spots[i] != UNKNOWN;
 				}
-				if (keep != null) {
-					keep.columns[column] = was;
-					keep.size += ROWS + was.chunks.length;
+				// Unless its arrays were written over while it was read: then the column is picked below.
+				if (Slabs.valid(wasSpots) && (wasSaved == null || Slabs.valid(wasSaved))) {
+					known |= knownHere;
+					if (keep != null) {
+						// Kept again, copied forward first if its arrays are about to leave the store's window.
+						Slabs.Run keptSpots = Slabs.renew(wasSpots);
+						Slabs.Run keptSaved = wasSaved == null ? null : Slabs.renew(wasSaved);
+						if (keptSpots != null && (wasSaved == null || keptSaved != null)) {
+							SpotColumns.Column kept2 = keptSpots == wasSpots && keptSaved == wasSaved ? was : was.with(keptSpots, keptSaved);
+							keep.columns[column] = kept2;
+							keep.add(kept2);
+						}
+					}
+					continue;
 				}
-				continue;
 			}
 			SpotColumns.Column made = keep == null ? null : new SpotColumns.Column();
+			int[] madeSpots = made == null ? null : MeshColumns.scratch(ROWS);
 			int z0 = Integer.MAX_VALUE;
 			int z1 = Integer.MIN_VALUE;
 			boolean unknown = false;
@@ -148,18 +164,20 @@ public final class TileSpots {
 				};
 				known |= spots[i] != UNKNOWN;
 				if (made != null) {
-					made.spots[row] = spots[i];
+					madeSpots[row] = spots[i];
 					z0 = Math.min(z0, pick.lastZ);
 					z1 = Math.max(z1, pick.firstZ);
 					unknown |= pick.readUnknown;
 				}
 			}
 			if (made != null) {
+				// Kept before spotColumn, which packs in the same scratch array.
+				made.spots = Slabs.keep(madeSpots, 0, ROWS);
 				SpotColumns.depend(made, pick, x, z0, z1);
 				made.usesSaved = unknown;
 				made.saved = unknown ? MeshColumns.spotColumn(saved, column) : null;
 				keep.columns[column] = made;
-				keep.size += ROWS + made.chunks.length;
+				keep.add(made);
 			}
 		}
 		if (keep != null) {

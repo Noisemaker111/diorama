@@ -29,21 +29,44 @@ final class SpotColumns {
 
 	/** One column, all its rows; see {@link #matches}. */
 	static final class Column {
-		final int[] spots = new int[TileSpots.ROWS];
+		/** Its spots, all {@link TileSpots#ROWS} rows. */
+		Slabs.Run spots;
 		/** The chunks its rays read, z from cz0, by token, {@link ChunkBakeData#MISSING} where none. */
 		int cz0;
 		Object[] chunks;
 		boolean usesSaved;
-		int @Nullable [] saved;
+		Slabs.@Nullable Run saved;
+
+		/** The same column with its ints in other runs; nothing writes a kept column once a tile holds it. */
+		Column with(Slabs.Run spots, Slabs.@Nullable Run saved) {
+			Column copy = new Column();
+			copy.spots = spots;
+			copy.cz0 = this.cz0;
+			copy.chunks = this.chunks;
+			copy.usesSaved = this.usesSaved;
+			copy.saved = saved;
+			return copy;
+		}
 	}
 
 	static final class Tile {
 		final Settings settings;
 		final @Nullable Column[] columns = new Column[TileSpots.COLUMNS];
 		long size;
+		/** The oldest {@link Slabs} array its columns' ints are in. */
+		long oldest = Slabs.serial();
 
 		Tile(Settings settings) {
 			this.settings = settings;
+		}
+
+		/** Notes a column kept in it. */
+		void add(Column column) {
+			this.size += TileSpots.ROWS + column.chunks.length;
+			this.oldest = Math.min(this.oldest, column.spots.serial);
+			if (column.saved != null) {
+				this.oldest = Math.min(this.oldest, column.saved.serial);
+			}
 		}
 	}
 
@@ -53,7 +76,7 @@ final class SpotColumns {
 
 	static synchronized @Nullable Tile get(TileKey key, Settings settings) {
 		Tile tile = TILES.get(key);
-		return tile != null && tile.settings.equals(settings) ? tile : null;
+		return tile != null && tile.settings.equals(settings) && Slabs.live(tile.oldest) ? tile : null;
 	}
 
 	static synchronized void put(TileKey key, Tile tile) {
@@ -70,6 +93,14 @@ final class SpotColumns {
 			}
 			ints -= t.size;
 			it.remove();
+		}
+		// Tiles whose ints are in arrays the store has moved on from: dropped, so the arrays can go.
+		for (it = TILES.values().iterator(); it.hasNext(); ) {
+			Tile t = it.next();
+			if (!Slabs.live(t.oldest)) {
+				ints -= t.size;
+				it.remove();
+			}
 		}
 	}
 
