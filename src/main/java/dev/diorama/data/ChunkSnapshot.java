@@ -609,7 +609,56 @@ public final class ChunkSnapshot {
 	}
 
 	public void setTints(Tints tints) {
+		this.setTints(tints, -1);
+	}
+
+	/** Tints blended under {@link BiomeTints#generation} {@code generation}, which a later snapshot may inherit. */
+	public void setTints(Tints tints, int generation) {
+		this.tintsGeneration = generation;
 		this.tints = tints;
+	}
+
+	/** The resolvers' generation {@link #tints} were blended under, or -1 when unknown. */
+	private volatile int tintsGeneration = -1;
+
+	/**
+	 * Takes the tints the snapshot this one replaces blended, when everything the blend reads is the
+	 * same: the biomes of this chunk and its neighbours (the game swaps in a new container rather than
+	 * changing one, so the same containers hold the same biomes), the column tops, the zoom seed, the
+	 * blend radius and the resolvers. Light and block changes away from the surface take a new snapshot
+	 * but leave all of that alone, so their chunks needn't be blended again. Returns whether it did.
+	 */
+	public boolean inheritTints(ChunkSnapshot before) {
+		Tints from = before.tints;
+		int generation = before.tintsGeneration;
+		if (from == null || generation < 0 || generation != dev.diorama.bake.BiomeTints.generation() || this.tints != null
+			|| this.base != null || before.base != null || this.chunkX != before.chunkX || this.chunkZ != before.chunkZ
+			|| this.biomeZoomSeed != before.biomeZoomSeed || this.blendRadius != before.blendRadius || this.fallbackBiome != before.fallbackBiome
+			|| this.minSectionY != before.minSectionY || !java.util.Arrays.equals(this.surface, before.surface)
+			|| this.biomes == null || before.biomes == null || this.biomes.length != before.biomes.length) {
+			return false;
+		}
+		for (int i = 0; i < this.biomes.length; i++) {
+			var mine = this.biomes[i];
+			var theirs = before.biomes[i];
+			if (mine == null || theirs == null) {
+				if (mine != theirs) {
+					return false;
+				}
+				continue;
+			}
+			if (mine.length != theirs.length) {
+				return false;
+			}
+			for (int s = 0; s < mine.length; s++) {
+				if (mine[s] != theirs[s]) {
+					return false;
+				}
+			}
+		}
+		this.tintsGeneration = generation;
+		this.tints = from;
+		return true;
 	}
 
 	/** Blended biome tints per column, as 0xRRGGBB, indexed {@code (z << 4) | x}. */
