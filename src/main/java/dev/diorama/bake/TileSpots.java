@@ -105,8 +105,71 @@ public final class TileSpots {
 		return patch.blockX() * PATCH_COLUMNS;
 	}
 
-	/** Fills in a rectangle of samples; returns whether any is known. */
+	/**
+	 * Fills in a rectangle of samples; returns whether any is known. In the sky view a column whose
+	 * chunks and saved spots are what they were when this tile's spots last picked it whole takes
+	 * those spots ({@link SpotColumns}); a whole pick keeps its columns for the next.
+	 */
 	private static boolean pick(TileKey key, MapPick pick, int[] spots, int @Nullable [] saved, int column0, int row0, int columns, int rows) {
+		SpotColumns.Settings settings = GpuMesher.REUSE && pick.columnOnly() ? SpotColumns.settings(pick, pick.looks()) : null;
+		if (settings == null) {
+			return pickRows(key, pick, spots, saved, column0, row0, columns, rows);
+		}
+		SpotColumns.Tile kept = SpotColumns.get(key, settings);
+		SpotColumns.Tile keep = row0 == 0 && rows == ROWS ? new SpotColumns.Tile(settings) : null;
+		int x0 = (int) Math.floor(key.minU());
+		boolean known = false;
+		for (int column = column0; column < column0 + columns; column++) {
+			int x = x0 + column;
+			SpotColumns.Column was = kept == null ? null : kept.columns[column];
+			if (was != null && SpotColumns.matches(was, pick, x, saved, column)) {
+				for (int row = row0; row < row0 + rows; row++) {
+					int i = row * COLUMNS + column;
+					spots[i] = was.spots[row];
+					known |= spots[i] != UNKNOWN;
+				}
+				if (keep != null) {
+					keep.columns[column] = was;
+					keep.size += ROWS + was.chunks.length;
+				}
+				continue;
+			}
+			SpotColumns.Column made = keep == null ? null : new SpotColumns.Column();
+			int z0 = Integer.MAX_VALUE;
+			int z1 = Integer.MIN_VALUE;
+			boolean unknown = false;
+			for (int row = row0; row < row0 + rows; row++) {
+				double v = v(key, row);
+				int i = row * COLUMNS + column;
+				spots[i] = switch (pick.pick(key.minU() + column + 0.5, v)) {
+					case MapPick.FOUND -> encode(pick.y, pick.z, v);
+					case MapPick.NOTHING -> NOTHING;
+					default -> saved == null ? UNKNOWN : saved[i];
+				};
+				known |= spots[i] != UNKNOWN;
+				if (made != null) {
+					made.spots[row] = spots[i];
+					z0 = Math.min(z0, pick.lastZ);
+					z1 = Math.max(z1, pick.firstZ);
+					unknown |= pick.readUnknown;
+				}
+			}
+			if (made != null) {
+				SpotColumns.depend(made, pick, x, z0, z1);
+				made.usesSaved = unknown;
+				made.saved = unknown ? MeshColumns.spotColumn(saved, column) : null;
+				keep.columns[column] = made;
+				keep.size += ROWS + made.chunks.length;
+			}
+		}
+		if (keep != null) {
+			SpotColumns.put(key, keep);
+		}
+		return known;
+	}
+
+	/** The rectangle as picked row by row, every sample. */
+	private static boolean pickRows(TileKey key, MapPick pick, int[] spots, int @Nullable [] saved, int column0, int row0, int columns, int rows) {
 		boolean known = false;
 		for (int row = row0; row < row0 + rows; row++) {
 			double v = v(key, row);

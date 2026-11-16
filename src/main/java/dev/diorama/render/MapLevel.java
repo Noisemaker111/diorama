@@ -597,6 +597,7 @@ public final class MapLevel implements ChunkSource {
 		if (before != null) {
 			// Before it's visible to bakes, so none blends what it can reuse.
 			snapshot.inheritTints(before);
+			snapshot.replacing(before);
 		}
 		this.chunks.put(snapshot.key(), snapshot);
 		if (changed == null && this.watchingLiveChunks) {
